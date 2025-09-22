@@ -1,10 +1,9 @@
-```bash
 #!/bin/bash
 
 # Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
 # https://cloud.google.com/vertex-ai/pricing
 
-PROJECT_ID="daev-playground"
+PROJECT_ID="my-project"
 OUTFILE="out.json"
 LOCATION="global"
 ENDPOINT="https://aiplatform.googleapis.com"
@@ -14,6 +13,7 @@ ENDPOINT="https://aiplatform.googleapis.com"
 # 1. Define the list of available models in an array
 MODELS=(
   "anthropic/claude-3-7-sonnet@20250219:streamRawPredict"
+  "anthropic/claude-sonnet-4@20250514:streamRawPredict"
   "anthropic/claude-opus-4-1@20250805:streamRawPredict"
   "google/gemini-2.5-flash@default:streamGenerateContent"
   "google/gemini-2.5-pro@default:streamGenerateContent"
@@ -21,7 +21,7 @@ MODELS=(
 
 # 2. Display a menu and prompt the user for a selection
 echo "Please select a model to use:"
-PS3="Enter number (1-4): " # Sets the prompt string for the select menu
+PS3="Enter number (1-5): " # Sets the prompt string for the select menu
 select selection in "${MODELS[@]}"; do
   if [[ -n "$selection" ]]; then
     echo "You selected: $selection"
@@ -95,4 +95,3 @@ elif [[ "$PUBLISHER" == "google" ]]; then
   # Parser for Google's streaming format (a stream of JSON objects)
   cat "$OUTFILE" | jq -r 'map(.candidates[0].content.parts[0].text) | join("")'
 fi
-```
