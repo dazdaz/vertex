@@ -1,9 +1,10 @@
 #!/bin/bash
 
+# Added: 30 Sep 2025 - Added support for Claude Sonnet 4.5
 # Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
 # https://cloud.google.com/vertex-ai/pricing
 
-PROJECT_ID="my-project"
+PROJECT_ID="my-playground"
 OUTFILE="out.json"
 LOCATION="global"
 ENDPOINT="https://aiplatform.googleapis.com"
@@ -15,13 +16,14 @@ MODELS=(
   "anthropic/claude-3-7-sonnet@20250219:streamRawPredict"
   "anthropic/claude-sonnet-4@20250514:streamRawPredict"
   "anthropic/claude-opus-4-1@20250805:streamRawPredict"
+  "anthropic/claude-sonnet-4-5@20250929:streamRawPredict"
   "google/gemini-2.5-flash@default:streamGenerateContent"
   "google/gemini-2.5-pro@default:streamGenerateContent"
 )
 
 # 2. Display a menu and prompt the user for a selection
 echo "Please select a model to use:"
-PS3="Enter number (1-5): " # Sets the prompt string for the select menu
+PS3="Enter number (1-6): " # <-- Updated prompt for 6 options
 select selection in "${MODELS[@]}"; do
   if [[ -n "$selection" ]]; then
     echo "You selected: $selection"
@@ -45,7 +47,6 @@ if [ -z "$USER_PROMPT" ]; then
     exit 1
 fi
 
-
 ACCESS_TOKEN=$(gcloud auth print-access-token)
 if [ -z "$ACCESS_TOKEN" ]; then
   echo "Error: Access token is empty. Please authenticate with gcloud auth login."
@@ -57,12 +58,12 @@ fi
 # This handles all special characters, quotes, and newlines automatically.
 if [[ "$PUBLISHER" == "anthropic" ]]; then
   JSON_PAYLOAD=$(jq -n \
-                  --arg prompt "$USER_PROMPT" \
-                  '{anthropic_version: "vertex-2023-10-16", messages: [{role: "user", content: $prompt}], max_tokens: 32000, stream: true}')
+                   --arg prompt "$USER_PROMPT" \
+                   '{anthropic_version: "vertex-2023-10-16", messages: [{role: "user", content: $prompt}], max_tokens: 32000, stream: true}')
 elif [[ "$PUBLISHER" == "google" ]]; then
   JSON_PAYLOAD=$(jq -n \
-                  --arg prompt "$USER_PROMPT" \
-                  '{contents: [{role: "user", parts: [{text: $prompt}]}]}')
+                   --arg prompt "$USER_PROMPT" \
+                   '{contents: [{role: "user", parts: [{text: $prompt}]}]}')
 fi
 
 # --- API Call ---
