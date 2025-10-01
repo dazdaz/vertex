@@ -1,10 +1,11 @@
 #!/bin/bash
 
+# Added: 01 Oct 2025 - 1M context window support for Claude Sonnet models
 # Added: 30 Sep 2025 - Added support for Claude Sonnet 4.5
 # Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
 # https://cloud.google.com/vertex-ai/pricing
 
-PROJECT_ID="my-playground"
+PROJECT_ID="daev-playground"
 OUTFILE="out.json"
 LOCATION="global"
 ENDPOINT="https://aiplatform.googleapis.com"
@@ -23,7 +24,7 @@ MODELS=(
 
 # 2. Display a menu and prompt the user for a selection
 echo "Please select a model to use:"
-PS3="Enter number (1-6): " # <-- Updated prompt for 6 options
+PS3="Enter number (1-6): "
 select selection in "${MODELS[@]}"; do
   if [[ -n "$selection" ]]; then
     echo "You selected: $selection"
@@ -37,6 +38,15 @@ done
 PUBLISHER=${selection%%/*}      # Gets everything before the first "/"
 MODEL=${selection#*/}           # Gets everything after the first "/"
 
+# Check if the selected model is a Sonnet variant for 1M context window support
+IS_SONNET=false
+if [[ "$MODEL" == *"sonnet"* ]]; then
+  IS_SONNET=true
+  echo "Note: This Sonnet model supports 1M context window."
+  read -p "Enable 1M context window? (y/n, default: n): " ENABLE_1M
+  ENABLE_1M=${ENABLE_1M:-n}
+fi
+
 # This block replaces the need for request-*.json files.
 echo -e "\nPlease enter your prompt. Press Ctrl+D when you are finished."
 USER_PROMPT=$(cat)
@@ -46,6 +56,7 @@ if [ -z "$USER_PROMPT" ]; then
     echo "Error: Prompt cannot be empty."
     exit 1
 fi
+
 
 ACCESS_TOKEN=$(gcloud auth print-access-token)
 if [ -z "$ACCESS_TOKEN" ]; then
@@ -57,9 +68,18 @@ fi
 # Use jq to safely inject the user's prompt into the correct JSON structure.
 # This handles all special characters, quotes, and newlines automatically.
 if [[ "$PUBLISHER" == "anthropic" ]]; then
-  JSON_PAYLOAD=$(jq -n \
-                   --arg prompt "$USER_PROMPT" \
-                   '{anthropic_version: "vertex-2023-10-16", messages: [{role: "user", content: $prompt}], max_tokens: 32000, stream: true}')
+  # Build base payload
+  if [[ "$IS_SONNET" == true && ( "$ENABLE_1M" == "y" || "$ENABLE_1M" == "Y" ) ]]; then
+    # Include the beta header for 1M context window
+    JSON_PAYLOAD=$(jq -n \
+                     --arg prompt "$USER_PROMPT" \
+                     '{anthropic_version: "vertex-2023-10-16", messages: [{role: "user", content: $prompt}], max_tokens: 32000, stream: true}')
+    ANTHROPIC_BETA_HEADER="context-1m-2025-08-07"
+  else
+    JSON_PAYLOAD=$(jq -n \
+                     --arg prompt "$USER_PROMPT" \
+                     '{anthropic_version: "vertex-2023-10-16", messages: [{role: "user", content: $prompt}], max_tokens: 32000, stream: true}')
+  fi
 elif [[ "$PUBLISHER" == "google" ]]; then
   JSON_PAYLOAD=$(jq -n \
                    --arg prompt "$USER_PROMPT" \
@@ -69,12 +89,24 @@ fi
 # --- API Call ---
 
 echo -e "\nSending request..."
-HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
-  -X POST \
-  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  -d "$JSON_PAYLOAD" \
-  "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL}")
+
+# Build curl command with conditional beta header
+if [[ "$PUBLISHER" == "anthropic" && -n "$ANTHROPIC_BETA_HEADER" ]]; then
+  HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
+    -X POST \
+    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+    -H "Content-Type: application/json; charset=utf-8" \
+    -H "anthropic-beta: ${ANTHROPIC_BETA_HEADER}" \
+    -d "$JSON_PAYLOAD" \
+    "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL}")
+else
+  HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
+    -X POST \
+    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+    -H "Content-Type: application/json; charset=utf-8" \
+    -d "$JSON_PAYLOAD" \
+    "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL}")
+fi
 
 if [[ "$HTTP_CODE" -ne 200 ]]; then
     echo "Error: API call failed with HTTP status code $HTTP_CODE."
