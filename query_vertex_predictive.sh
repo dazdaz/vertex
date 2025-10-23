@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# Added: Dynamic model discovery from Vertex AI API
 # Added: 01 Oct 2025 - 1M context window support for Claude Sonnet models
 # Added: 30 Sep 2025 - Added support for Claude Sonnet 4.5
 # Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
@@ -10,32 +11,276 @@ OUTFILE="out.json"
 LOCATION="global"
 ENDPOINT="https://aiplatform.googleapis.com"
 
+# Function to display help
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+A script to interact with various AI models through Google Cloud Vertex AI.
+
+OPTIONS:
+    -h, --help      Show this help message and exit
+    -l, --list      List all available models and exit
+    -r, --refresh   Refresh the model cache and exit
+    
+IMPORTANT:
+    Before using certain models (particularly Claude Opus 4.1), you must accept 
+    the End User License Agreement (EULA) through either:
+    - The Vertex AI UI in Google Cloud Console
+    - Using gcloud CLI: gcloud ai models describe <model-name> --project=<project-id>
+    
+    Failure to accept the EULA will result in API errors when querying the endpoint.
+
+USAGE EXAMPLE:
+    1. Run the script: $0
+    2. Select a model from the menu
+    3. Enter your prompt (press Ctrl+D when finished)
+    4. View the response
+
+PROJECT CONFIGURATION:
+    Current Project ID: $PROJECT_ID
+    Location: $LOCATION
+    
+For more information about pricing, visit:
+https://cloud.google.com/vertex-ai/pricing
+
+EOF
+}
+
+# Function to discover all available models from the API
+discover_models() {
+    local cache_file="/tmp/vertex_models_cache.json"
+    local cache_age=$((60 * 60 * 24)) # 24 hours in seconds
+    
+    # Check if cache exists and is fresh
+    if [[ -f "$cache_file" ]] && [[ $(find "$cache_file" -mtime -1 2>/dev/null) ]]; then
+        if [[ "$1" != "force" ]]; then
+            echo "Using cached model list (use -r to refresh)" >&2
+            cat "$cache_file"
+            return
+        fi
+    fi
+    
+    echo "Discovering available models from Vertex AI API..." >&2
+    
+    ACCESS_TOKEN=$(gcloud auth print-access-token)
+    if [ -z "$ACCESS_TOKEN" ]; then
+        echo "Error: Access token is empty. Please authenticate with gcloud auth login." >&2
+        exit 1
+    fi
+    
+    # Query for all publishers
+    local publishers=("anthropic" "google" "meta" "mistral" "cohere")
+    local all_models="[]"
+    
+    for publisher in "${publishers[@]}"; do
+        echo "Checking $publisher models..." >&2
+        
+        # List models for this publisher
+        local response=$(curl -s \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${publisher}/models")
+        
+        if [[ $? -eq 0 ]] && [[ -n "$response" ]]; then
+            # Parse the response and add publisher info
+            local models=$(echo "$response" | jq -r '.models[]?.name // empty' 2>/dev/null | while read -r model; do
+                if [[ -n "$model" ]]; then
+                    # Extract just the model name from the full path
+                    model_name=$(echo "$model" | awk -F'/' '{print $NF}')
+                    
+                    # Determine the appropriate method based on publisher
+                    if [[ "$publisher" == "anthropic" ]]; then
+                        method="streamRawPredict"
+                    else
+                        method="streamGenerateContent"
+                    fi
+                    
+                    echo "{\"publisher\": \"$publisher\", \"model\": \"$model_name\", \"method\": \"$method\"}"
+                fi
+            done | jq -s '.')
+            
+            if [[ -n "$models" ]] && [[ "$models" != "[]" ]]; then
+                all_models=$(echo "$all_models" "$models" | jq -s 'add')
+            fi
+        fi
+    done
+    
+    # Also check for models using the models list endpoint
+    echo "Checking additional models via models endpoint..." >&2
+    local models_response=$(curl -s \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/models")
+    
+    if [[ $? -eq 0 ]] && [[ -n "$models_response" ]]; then
+        local additional_models=$(echo "$models_response" | jq -r '.models[]?.name // empty' 2>/dev/null | while read -r model; do
+            if [[ -n "$model" ]]; then
+                # Parse the model path to extract publisher and model name
+                # Format: projects/{project}/locations/{location}/models/{model}
+                model_id=$(echo "$model" | awk -F'/' '{print $NF}')
+                
+                # Try to determine publisher from model name
+                if [[ "$model_id" == *"claude"* ]]; then
+                    publisher="anthropic"
+                    method="streamRawPredict"
+                elif [[ "$model_id" == *"gemini"* ]]; then
+                    publisher="google"
+                    method="streamGenerateContent"
+                elif [[ "$model_id" == *"llama"* ]]; then
+                    publisher="meta"
+                    method="streamGenerateContent"
+                elif [[ "$model_id" == *"mistral"* ]]; then
+                    publisher="mistral"
+                    method="streamGenerateContent"
+                else
+                    # Skip unknown models
+                    return
+                fi
+                
+                echo "{\"publisher\": \"$publisher\", \"model\": \"$model_id\", \"method\": \"$method\"}"
+            fi
+        done | jq -s '.')
+        
+        if [[ -n "$additional_models" ]] && [[ "$additional_models" != "[]" ]]; then
+            all_models=$(echo "$all_models" "$additional_models" | jq -s 'add | unique_by(.model)')
+        fi
+    fi
+    
+    # If we still have no models, fall back to known defaults
+    if [[ "$all_models" == "[]" ]]; then
+        echo "Could not discover models from API, using defaults..." >&2
+        all_models='[
+            {"publisher": "anthropic", "model": "claude-3-7-sonnet@20250219", "method": "streamRawPredict"},
+            {"publisher": "anthropic", "model": "claude-sonnet-4@20250514", "method": "streamRawPredict"},
+            {"publisher": "anthropic", "model": "claude-opus-4-1@20250805", "method": "streamRawPredict"},
+            {"publisher": "anthropic", "model": "claude-sonnet-4-5@20250929", "method": "streamRawPredict"},
+            {"publisher": "anthropic", "model": "claude-haiku-4-5@20251001", "method": "streamRawPredict"},
+            {"publisher": "google", "model": "gemini-2.5-flash@default", "method": "streamGenerateContent"},
+            {"publisher": "google", "model": "gemini-2.5-pro@default", "method": "streamGenerateContent"},
+            {"publisher": "google", "model": "gemini-1.5-flash-001", "method": "streamGenerateContent"},
+            {"publisher": "google", "model": "gemini-1.5-pro-001", "method": "streamGenerateContent"},
+            {"publisher": "meta", "model": "llama3-405b-instruct-maas", "method": "streamGenerateContent"},
+            {"publisher": "meta", "model": "llama3-70b-instruct-maas", "method": "streamGenerateContent"},
+            {"publisher": "meta", "model": "llama3-8b-instruct-maas", "method": "streamGenerateContent"},
+            {"publisher": "mistral", "model": "mistral-large@latest", "method": "streamGenerateContent"},
+            {"publisher": "mistral", "model": "mistral-nemo@latest", "method": "streamGenerateContent"},
+            {"publisher": "cohere", "model": "command-r-plus", "method": "streamGenerateContent"},
+            {"publisher": "cohere", "model": "command-r", "method": "streamGenerateContent"}
+        ]'
+    fi
+    
+    # Save to cache
+    echo "$all_models" > "$cache_file"
+    echo "$all_models"
+}
+
+# Function to list available models
+list_models() {
+    local models_json=$(discover_models)
+    
+    echo "Available models:"
+    echo "=================="
+    
+    # Parse and display models grouped by publisher
+    local publishers=$(echo "$models_json" | jq -r '.[].publisher' | sort -u)
+    
+    local counter=1
+    for publisher in $publishers; do
+        echo ""
+        echo "[$publisher]"
+        echo "---"
+        
+        echo "$models_json" | jq -r --arg pub "$publisher" '.[] | select(.publisher == $pub) | .model' | while read -r model; do
+            # Add notes for specific models
+            note=""
+            if [[ "$model" == *"opus"* ]]; then
+                note=" (EULA acceptance required)"
+            elif [[ "$model" == *"sonnet"* ]]; then
+                note=" (Supports 1M context window)"
+            elif [[ "$model" == *"405b"* ]]; then
+                note=" (405B parameters)"
+            elif [[ "$model" == *"70b"* ]]; then
+                note=" (70B parameters)"
+            elif [[ "$model" == *"8b"* ]]; then
+                note=" (8B parameters)"
+            fi
+            
+            printf "%3d. %-50s%s\n" "$counter" "$model" "$note"
+            ((counter++))
+        done
+    done
+    
+    echo ""
+    echo "Note: Some models require EULA acceptance before use."
+    echo "Total models discovered: $(echo "$models_json" | jq 'length')"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -l|--list)
+            list_models
+            exit 0
+            ;;
+        -r|--refresh)
+            discover_models "force" > /dev/null
+            echo "Model cache refreshed."
+            list_models
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
 # --- Model Selection ---
 
-# 1. Define the list of available models in an array
-MODELS=(
-  "anthropic/claude-3-7-sonnet@20250219:streamRawPredict"
-  "anthropic/claude-sonnet-4@20250514:streamRawPredict"
-  "anthropic/claude-opus-4-1@20250805:streamRawPredict"
-  "anthropic/claude-sonnet-4-5@20250929:streamRawPredict"
-  "anthropic/claude-haiku-4-5@20251001:streamRawPredict"
-  "google/gemini-2.5-flash@default:streamGenerateContent"
-  "google/gemini-2.5-pro@default:streamGenerateContent"
-)
+# Get available models
+models_json=$(discover_models)
+models_array=()
 
-# 2. Display a menu and prompt the user for a selection
+# Build array for selection
+while IFS= read -r line; do
+    models_array+=("$line")
+done < <(echo "$models_json" | jq -r '.[] | "\(.publisher)/\(.model):\(.method)"')
+
+if [[ ${#models_array[@]} -eq 0 ]]; then
+    echo "Error: No models available"
+    exit 1
+fi
+
 echo "Please select a model to use:"
-PS3="Enter number (1-7): "
-select selection in "${MODELS[@]}"; do
+PS3="Enter number (1-${#models_array[@]}): "
+select selection in "${models_array[@]}"; do
   if [[ -n "$selection" ]]; then
     echo "You selected: $selection"
+    
+    # Check if model might require EULA
+    if [[ "$selection" == *"opus"* ]]; then
+        echo ""
+        echo "⚠️  WARNING: This model requires EULA acceptance."
+        echo "   If you haven't accepted the EULA yet, the API call will fail."
+        echo "   Accept it through Vertex AI UI or gcloud CLI before proceeding."
+        read -p "Continue? (y/n): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "Exiting..."
+            exit 0
+        fi
+    fi
     break
   else
     echo "Invalid selection. Please try again."
   fi
 done
 
-# 3. Parse the selection to get the publisher and model ID
+# Parse the selection to get the publisher and model ID
 PUBLISHER=${selection%%/*}      # Gets everything before the first "/"
 MODEL=${selection#*/}           # Gets everything after the first "/"
 
@@ -57,7 +302,6 @@ if [ -z "$USER_PROMPT" ]; then
     echo "Error: Prompt cannot be empty."
     exit 1
 fi
-
 
 ACCESS_TOKEN=$(gcloud auth print-access-token)
 if [ -z "$ACCESS_TOKEN" ]; then
@@ -81,7 +325,8 @@ if [[ "$PUBLISHER" == "anthropic" ]]; then
                      --arg prompt "$USER_PROMPT" \
                      '{anthropic_version: "vertex-2023-10-16", messages: [{role: "user", content: $prompt}], max_tokens: 32000, stream: true}')
   fi
-elif [[ "$PUBLISHER" == "google" ]]; then
+else
+  # For Google, Meta, Mistral, Cohere models
   JSON_PAYLOAD=$(jq -n \
                    --arg prompt "$USER_PROMPT" \
                    '{contents: [{role: "user", parts: [{text: $prompt}]}]}')
@@ -111,6 +356,14 @@ fi
 
 if [[ "$HTTP_CODE" -ne 200 ]]; then
     echo "Error: API call failed with HTTP status code $HTTP_CODE."
+    
+    # Check for EULA-related error
+    if [[ "$HTTP_CODE" -eq 403 ]] || [[ "$HTTP_CODE" -eq 400 ]]; then
+        echo ""
+        echo "⚠️  This might be an EULA acceptance issue."
+        echo "   Please ensure you've accepted the EULA for this model."
+    fi
+    
     echo "API Response:"
     cat "$OUTFILE"
     exit 1
@@ -121,11 +374,13 @@ echo "Response saved to $OUTFILE."
 # --- Format Output ---
 
 echo -e "\n--- Formatted Output ---"
-# 5. Use the correct parser based on the publisher
+# Use the correct parser based on the publisher
 if [[ "$PUBLISHER" == "anthropic" ]]; then
   # Parser for Anthropic's streaming format (Server-Sent Events)
-  cat "$OUTFILE" | grep '^data:' | sed 's/^data: //' | jq -j 'select(.type == "content_block_delta") | .delta.text'; echo
-elif [[ "$PUBLISHER" == "google" ]]; then
-  # Parser for Google's streaming format (a stream of JSON objects)
-  cat "$OUTFILE" | jq -r 'map(.candidates[0].content.parts[0].text) | join("")'
+  cat "$OUTFILE" | grep '^data:' | sed 's/^data: //' | jq -j 'select(.type == "content_block_delta") | .delta.text' 2>/dev/null; echo
+else
+  # Parser for Google, Meta, Mistral, Cohere streaming format (a stream of JSON objects)
+  cat "$OUTFILE" | jq -r 'map(.candidates[0].content.parts[0].text) | join("")' 2>/dev/null || \
+  cat "$OUTFILE" | jq -r '.candidates[0].content.parts[0].text' 2>/dev/null || \
+  echo "Could not parse response. Check $OUTFILE for raw output."
 fi
