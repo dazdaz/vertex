@@ -6,7 +6,7 @@
 # Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
 # https://cloud.google.com/vertex-ai/pricing
 
-PROJECT_ID="daev-playground"
+PROJECT_ID="my-playground"
 OUTFILE="out.json"
 LOCATION="global"
 ENDPOINT="https://aiplatform.googleapis.com"
