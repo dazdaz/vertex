@@ -1,16 +1,12 @@
 #!/bin/bash
 
 # Multi-endpoint script for querying AI models via Google AI Studio or Vertex AI
-# Added: 18 Nov 2025 - Support for both AI Studio and Vertex AI endpoints
-# Added: 01 Oct 2025 - 1M context window support for Claude Sonnet models
-# Added: 30 Sep 2025 - Added support for Claude Sonnet 4.5
-# Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
-# https://cloud.google.com/vertex-ai/pricing
+# Updated: 18 Nov 2025 - Changed to use GLOBAL Vertex AI endpoint.
 
-PROJECT_ID="my-playground"
+PROJECT_ID="genosis-prod"
 OUTFILE="out.json"
-LOCATION="us-central1" # Changed to a common Vertex AI region
-VERTEX_ENDPOINT="https://us-central1-aiplatform.googleapis.com" # Updated for regional Vertex AI
+LOCATION="global" # Set to global location for the global endpoint (Vertex AI)
+VERTEX_ENDPOINT="https://aiplatform.googleapis.com" # Global Vertex AI endpoint
 AISTUDIO_ENDPOINT="https://generativelanguage.googleapis.com"
 MODEL_CACHE_FILE="/tmp/vertex_models_cache.json"
 
@@ -59,7 +55,24 @@ https://ai.google.dev/pricing
 EOF
 }
 
-# Function to discover all available models from Vertex AI API (FIXED)
+# Function to check and enable Vertex AI API
+check_enable_api() {
+    echo "Checking Vertex AI API status..." >&2
+    if ! gcloud services list --enabled --project="$PROJECT_ID" | grep -q "aiplatform.googleapis.com"; then
+        echo "Vertex AI API is not enabled. Enabling it now..." >&2
+        gcloud services enable aiplatform.googleapis.com --project="$PROJECT_ID"
+        if [ $? -eq 0 ]; then
+            echo "Vertex AI API enabled successfully." >&2
+        else
+            echo "Error: Failed to enable Vertex AI API." >&2
+            exit 1
+        fi
+    else
+        echo "Vertex AI API is already enabled." >&2
+    fi
+}
+
+# Function to discover all available models from Vertex AI API (FIXED FOR JQ ERROR)
 discover_vertex_models() {
     local cache_file="$MODEL_CACHE_FILE"
     local cache_age=$((60 * 60 * 24)) # 24 hours in seconds
@@ -74,16 +87,51 @@ discover_vertex_models() {
     
     echo "Discovering available models from Vertex AI API..." >&2
     
+    # Ensure API is enabled before discovery
+    check_enable_api
+
     ACCESS_TOKEN=$(gcloud auth print-access-token 2>/dev/null)
     if [ -z "$ACCESS_TOKEN" ]; then
         echo "Error: gcloud authentication required. Run 'gcloud auth application-default login'." >&2
         exit 1
     fi
+    
+    local RAW_RESPONSE_FILE="/tmp/raw_vertex_response.json"
+    local HTTP_CODE
 
     # API call to list all models from all publishers
-    curl -s -X GET \
+    HTTP_CODE=$(curl -s -w "%{http_code}" -X GET \
+      -o "$RAW_RESPONSE_FILE" \
       -H "Authorization: Bearer $ACCESS_TOKEN" \
-      "${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models" | jq -r '
+      "${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models")
+
+    if [[ "$HTTP_CODE" -ne 200 ]]; then
+        echo "Warning: Vertex AI model listing failed with HTTP status code $HTTP_CODE." >&2
+        echo "Falling back to hardcoded model list." >&2
+        
+        # Create a fallback cache file
+        cat <<EOF > "$cache_file"
+google/gemini-1.5-pro-002
+google/gemini-1.5-flash-002
+google/gemini-1.0-pro
+google/gemini-1.0-pro-001
+google/gemini-1.0-pro-002
+google/gemini-1.5-pro-preview-0409
+google/gemini-1.5-flash-preview-0514
+EOF
+        
+        # Append known third-party models
+        echo "anthropic/claude-3-opus-20240229" >> "$cache_file"
+        echo "anthropic/claude-3-sonnet-20240229" >> "$cache_file"
+        echo "anthropic/claude-3-haiku-20240307" >> "$cache_file"
+        echo "anthropic/claude-3-5-sonnet-v2@20241022" >> "$cache_file"
+        
+        cat "$cache_file"
+        return
+    fi
+
+    # Pipe the raw file to jq for parsing and saving to cache
+    cat "$RAW_RESPONSE_FILE" | jq -r '
         .models[] | 
         # Filter for models that are ready to use
         select(.launchStage != "BETA" and .launchStage != "ALPHA" and .launchStage != "UNSPECIFIED") |
@@ -91,9 +139,7 @@ discover_vertex_models() {
         "\(.publisher)/\(.name)"
       ' > "$cache_file" 
       
-    # Append Anthropic models (since the list only returns Google models by default)
-    # Note: A real implementation would query all available publishers or use a pre-defined list.
-    # We simulate this by appending known Anthropic models.
+    # Append known third-party models (simulated discovery)
     echo "anthropic/claude-3-opus-20240229" >> "$cache_file"
     echo "anthropic/claude-3-sonnet-20240229" >> "$cache_file"
     echo "anthropic/claude-3-haiku-20240307" >> "$cache_file"
@@ -101,6 +147,7 @@ discover_vertex_models() {
     # Add Google AI Studio models (predefined)
     echo "google/gemini-2.5-flash" >> "$cache_file"
     echo "google/gemini-2.5-pro" >> "$cache_file"
+    echo "google/gemini-3-pro-preview" >> "$cache_file"
 
     cat "$cache_file"
 }
@@ -116,7 +163,11 @@ select_endpoint() {
     case "$ENDPOINT_CHOICE" in
         1)
             ENDPOINT_TYPE="aistudio"
-            if [ -z "$API_KEY" ]; then
+            # Check for API key in environment variable first
+            if [ -n "$GEMINI_API_KEY" ]; then
+                API_KEY="$GEMINI_API_KEY"
+                echo "Using API key from GEMINI_API_KEY environment variable."
+            elif [ -z "$API_KEY" ]; then
                 read -r -s -p "Enter Google AI Studio API Key: " API_KEY
                 echo
             fi
@@ -131,37 +182,37 @@ select_endpoint() {
     esac
 }
 
-# Function to select the model (REQUIRED for the script to run)
+# Function to select the model
 select_model() {
     local models
     
     if [[ "$ENDPOINT_TYPE" == "aistudio" ]]; then
-        # Hardcoded list for AI Studio
-        models=$(echo -e "google/gemini-2.5-flash\ngoogle/gemini-2.5-pro")
+        # Hardcoded list for AI Studio (Includes Gemini 3 Pro Preview)
+        models="google/gemini-2.5-flash google/gemini-2.5-pro google/gemini-3-pro-preview"
     else
         # Discover models for Vertex AI
         models=$(discover_vertex_models)
     fi
     
     if [ -z "$models" ]; then
-        echo "Error: No models found for the selected endpoint."
+        echo "Error: No models found for the selected endpoint." >&2
         exit 1
     fi
     
-    echo ""
-    echo "--- Available Models ---"
+    echo "" >&2
+    echo "--- Available Models ---" >&2
     
     # Create an indexed menu
     local model_array=($models)
     for i in "${!model_array[@]}"; do
-        printf "%3d) %s\n" $((i+1)) "${model_array[i]}"
+        printf "%3d) %s\n" $((i+1)) "${model_array[i]}" >&2
     done
     
-    echo "------------------------"
+    echo "------------------------" >&2
     read -r -p "Select model number: " MODEL_CHOICE
     
     if ! [[ "$MODEL_CHOICE" =~ ^[0-9]+$ ]] || [ "$MODEL_CHOICE" -lt 1 ] || [ "$MODEL_CHOICE" -gt ${#model_array[@]} ]; then
-        echo "Invalid model selection. Exiting."
+        echo "Invalid model selection. Exiting." >&2
         exit 1
     fi
     
@@ -230,6 +281,9 @@ fi
 
 # Get access token for Vertex AI
 if [[ "$ENDPOINT_TYPE" == "vertex" ]]; then
+    # Ensure API is enabled before making requests
+    check_enable_api
+
     ACCESS_TOKEN=$(gcloud auth print-access-token 2>/dev/null)
     if [ -z "$ACCESS_TOKEN" ]; then
         echo "Error: Access token is empty. Please authenticate with 'gcloud auth application-default login'."
@@ -267,6 +321,8 @@ if [[ "$ENDPOINT_TYPE" == "aistudio" ]]; then
     API_MODEL_NAME=${MODEL##*:}
     API_URL="${AISTUDIO_ENDPOINT}/v1beta/models/${API_MODEL_NAME}:streamGenerateContent?key=${API_KEY}"
     
+    echo "Request URL: $API_URL"
+    
     HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
         -s -X POST \
         -H "Content-Type: application/json; charset=utf-8" \
@@ -274,7 +330,10 @@ if [[ "$ENDPOINT_TYPE" == "aistudio" ]]; then
         "$API_URL")
 else
     # Vertex AI endpoint
+    # The API call for Vertex AI uses the global endpoint and global location
     API_URL="${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL##*:}:streamGenerateContent"
+    
+    echo "Request URL: $API_URL"
     
     # Build curl command with conditional beta header
     CURL_HEADERS=(-H "Authorization: Bearer ${ACCESS_TOKEN}" -H "Content-Type: application/json; charset=utf-8")
