@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Added: Dynamic model discovery from Vertex AI API
+# Multi-endpoint script for querying AI models via Google AI Studio or Vertex AI
+# Added: 18 Nov 2025 - Support for both AI Studio and Vertex AI endpoints
 # Added: 01 Oct 2025 - 1M context window support for Claude Sonnet models
 # Added: 30 Sep 2025 - Added support for Claude Sonnet 4.5
 # Claude Opus 4.1 - Accept the EULA for this model in Vertex UI or from gcloud ai ...
@@ -9,23 +10,29 @@
 PROJECT_ID="my-playground"
 OUTFILE="out.json"
 LOCATION="global"
-ENDPOINT="https://aiplatform.googleapis.com"
+VERTEX_ENDPOINT="https://aiplatform.googleapis.com"
+AISTUDIO_ENDPOINT="https://generativelanguage.googleapis.com"
 
 # Function to display help
 show_help() {
-    cat << EOF
+    cat <<EOF
 Usage: $0 [OPTIONS]
 
-A script to interact with various AI models through Google Cloud Vertex AI.
+A script to interact with various AI models through Google AI Studio or Vertex AI.
 
 OPTIONS:
     -h, --help      Show this help message and exit
     -l, --list      List all available models and exit
-    -r, --refresh   Refresh the model cache and exit
+    -r, --refresh   Refresh the model cache (Vertex AI only) and exit
+    
+ENDPOINTS:
+    This script supports two endpoints:
+    1. Google AI Studio - Uses API key authentication, primarily for Gemini models
+    2. Vertex AI - Uses gcloud OAuth authentication, supports multiple model providers
     
 IMPORTANT:
-    Before using certain models (particularly Claude Opus 4.1), you must accept 
-    the End User License Agreement (EULA) through either:
+    Before using certain models (particularly Claude Opus 4.1 on Vertex AI), you must 
+    accept the End User License Agreement (EULA) through either:
     - The Vertex AI UI in Google Cloud Console
     - Using gcloud CLI: gcloud ai models describe <model-name> --project=<project-id>
     
@@ -33,22 +40,24 @@ IMPORTANT:
 
 USAGE EXAMPLE:
     1. Run the script: $0
-    2. Select a model from the menu
-    3. Enter your prompt (press Ctrl+D when finished)
-    4. View the response
+    2. Select an endpoint (AI Studio or Vertex AI)
+    3. Select a model from the menu
+    4. Enter your prompt (press Ctrl+D when finished)
+    5. View the response
 
-PROJECT CONFIGURATION:
+PROJECT CONFIGURATION (Vertex AI):
     Current Project ID: $PROJECT_ID
     Location: $LOCATION
     
 For more information about pricing, visit:
 https://cloud.google.com/vertex-ai/pricing
+https://ai.google.dev/pricing
 
 EOF
 }
 
-# Function to discover all available models from the API
-discover_models() {
+# Function to discover all available models from Vertex AI API
+discover_vertex_models() {
     local cache_file="/tmp/vertex_models_cache.json"
     local cache_age=$((60 * 60 * 24)) # 24 hours in seconds
     
@@ -79,7 +88,7 @@ discover_models() {
         # List models for this publisher
         local response=$(curl -s \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${publisher}/models")
+            "${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${publisher}/models")
         
         if [[ $? -eq 0 ]] && [[ -n "$response" ]]; then
             # Parse the response and add publisher info
@@ -109,7 +118,7 @@ discover_models() {
     echo "Checking additional models via models endpoint..." >&2
     local models_response=$(curl -s \
         -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-        "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/models")
+        "${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/models")
     
     if [[ $? -eq 0 ]] && [[ -n "$models_response" ]]; then
         local additional_models=$(echo "$models_response" | jq -r '.models[]?.name // empty' 2>/dev/null | while read -r model; do
@@ -158,6 +167,8 @@ discover_models() {
             {"publisher": "google", "model": "gemini-2.5-pro@default", "method": "streamGenerateContent"},
             {"publisher": "google", "model": "gemini-1.5-flash-001", "method": "streamGenerateContent"},
             {"publisher": "google", "model": "gemini-1.5-pro-001", "method": "streamGenerateContent"},
+            {"publisher": "google", "model": "gemini-3-pro-preview-11-2025", "method": "streamGenerateContent"},
+            {"publisher": "google", "model": "gemini-3.0-pro-eval-001", "method": "streamGenerateContent"},
             {"publisher": "meta", "model": "llama3-405b-instruct-maas", "method": "streamGenerateContent"},
             {"publisher": "meta", "model": "llama3-70b-instruct-maas", "method": "streamGenerateContent"},
             {"publisher": "meta", "model": "llama3-8b-instruct-maas", "method": "streamGenerateContent"},
@@ -173,11 +184,31 @@ discover_models() {
     echo "$all_models"
 }
 
+# Function to get AI Studio models (predefined list)
+get_aistudio_models() {
+    echo '[
+        {"publisher": "google", "model": "gemini-2.0-flash-exp", "method": "streamGenerateContent"},
+        {"publisher": "google", "model": "gemini-exp-1206", "method": "streamGenerateContent"},
+        {"publisher": "google", "model": "gemini-2.0-flash-thinking-exp-1219", "method": "streamGenerateContent"},
+        {"publisher": "google", "model": "gemini-1.5-flash", "method": "streamGenerateContent"},
+        {"publisher": "google", "model": "gemini-1.5-flash-8b", "method": "streamGenerateContent"},
+        {"publisher": "google", "model": "gemini-1.5-pro", "method": "streamGenerateContent"}
+    ]'
+}
+
 # Function to list available models
 list_models() {
-    local models_json=$(discover_models)
+    local endpoint_type="$1"
+    local models_json
     
-    echo "Available models:"
+    if [[ "$endpoint_type" == "aistudio" ]]; then
+        models_json=$(get_aistudio_models)
+        echo "Available models (AI Studio):"
+    else
+        models_json=$(discover_vertex_models)
+        echo "Available models (Vertex AI):"
+    fi
+    
     echo "=================="
     
     # Parse and display models grouped by publisher
@@ -210,8 +241,10 @@ list_models() {
     done
     
     echo ""
-    echo "Note: Some models require EULA acceptance before use."
-    echo "Total models discovered: $(echo "$models_json" | jq 'length')"
+    if [[ "$endpoint_type" != "aistudio" ]]; then
+        echo "Note: Some models require EULA acceptance before use."
+    fi
+    echo "Total models available: $(echo "$models_json" | jq 'length')"
 }
 
 # Parse command line arguments
@@ -222,13 +255,21 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -l|--list)
-            list_models
+            echo "Select endpoint to list models:"
+            echo "1) AI Studio"
+            echo "2) Vertex AI"
+            read -p "Enter choice (1-2): " list_choice
+            case $list_choice in
+                1) list_models "aistudio" ;;
+                2) list_models "vertex" ;;
+                *) echo "Invalid choice"; exit 1 ;;
+            esac
             exit 0
             ;;
         -r|--refresh)
-            discover_models "force" > /dev/null
+            discover_vertex_models "force" > /dev/null
             echo "Model cache refreshed."
-            list_models
+            list_models "vertex"
             exit 0
             ;;
         *)
@@ -240,10 +281,38 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+# --- Endpoint Selection ---
+
+echo "Select endpoint:"
+echo "1) AI Studio (API key authentication)"
+echo "2) Vertex AI (gcloud OAuth authentication)"
+read -p "Enter choice (1-2): " endpoint_choice
+
+case $endpoint_choice in
+    1)
+        ENDPOINT_TYPE="aistudio"
+        echo "Using AI Studio endpoint"
+        read -p "Enter your AI Studio API key: " -s API_KEY
+        echo ""
+        if [ -z "$API_KEY" ]; then
+            echo "Error: API key cannot be empty."
+            exit 1
+        fi
+        models_json=$(get_aistudio_models)
+        ;;
+    2)
+        ENDPOINT_TYPE="vertex"
+        echo "Using Vertex AI endpoint"
+        models_json=$(discover_vertex_models)
+        ;;
+    *)
+        echo "Invalid choice. Exiting."
+        exit 1
+        ;;
+esac
+
 # --- Model Selection ---
 
-# Get available models
-models_json=$(discover_models)
 models_array=()
 
 # Build array for selection
@@ -262,8 +331,8 @@ select selection in "${models_array[@]}"; do
   if [[ -n "$selection" ]]; then
     echo "You selected: $selection"
     
-    # Check if model might require EULA
-    if [[ "$selection" == *"opus"* ]]; then
+    # Check if model might require EULA (Vertex AI only)
+    if [[ "$ENDPOINT_TYPE" == "vertex" ]] && [[ "$selection" == *"opus"* ]]; then
         echo ""
         echo "⚠️  WARNING: This model requires EULA acceptance."
         echo "   If you haven't accepted the EULA yet, the API call will fail."
@@ -303,10 +372,13 @@ if [ -z "$USER_PROMPT" ]; then
     exit 1
 fi
 
-ACCESS_TOKEN=$(gcloud auth print-access-token)
-if [ -z "$ACCESS_TOKEN" ]; then
-  echo "Error: Access token is empty. Please authenticate with gcloud auth login."
-  exit 1
+# Get access token for Vertex AI
+if [[ "$ENDPOINT_TYPE" == "vertex" ]]; then
+    ACCESS_TOKEN=$(gcloud auth print-access-token)
+    if [ -z "$ACCESS_TOKEN" ]; then
+      echo "Error: Access token is empty. Please authenticate with gcloud auth login."
+      exit 1
+    fi
 fi
 
 # Dynamically build the JSON payload ---
@@ -336,29 +408,42 @@ fi
 
 echo -e "\nSending request..."
 
-# Build curl command with conditional beta header
-if [[ "$PUBLISHER" == "anthropic" && -n "$ANTHROPIC_BETA_HEADER" ]]; then
-  HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
-    -X POST \
-    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    -H "Content-Type: application/json; charset=utf-8" \
-    -H "anthropic-beta: ${ANTHROPIC_BETA_HEADER}" \
-    -d "$JSON_PAYLOAD" \
-    "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL}")
+# Build the appropriate URL and curl command based on endpoint type
+if [[ "$ENDPOINT_TYPE" == "aistudio" ]]; then
+    # AI Studio endpoint
+    API_URL="${AISTUDIO_ENDPOINT}/v1beta/models/${MODEL##*:}:streamGenerateContent?key=${API_KEY}"
+    
+    HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
+        -X POST \
+        -H "Content-Type: application/json; charset=utf-8" \
+        -d "$JSON_PAYLOAD" \
+        "$API_URL")
 else
-  HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
-    -X POST \
-    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    -H "Content-Type: application/json; charset=utf-8" \
-    -d "$JSON_PAYLOAD" \
-    "${ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL}")
+    # Vertex AI endpoint
+    # Build curl command with conditional beta header
+    if [[ "$PUBLISHER" == "anthropic" && -n "$ANTHROPIC_BETA_HEADER" ]]; then
+      HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
+        -X POST \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        -H "Content-Type: application/json; charset=utf-8" \
+        -H "anthropic-beta: ${ANTHROPIC_BETA_HEADER}" \
+        -d "$JSON_PAYLOAD" \
+        "${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL##*:}")
+    else
+      HTTP_CODE=$(curl -w "%{http_code}" -o "$OUTFILE" \
+        -X POST \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        -H "Content-Type: application/json; charset=utf-8" \
+        -d "$JSON_PAYLOAD" \
+        "${VERTEX_ENDPOINT}/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/${PUBLISHER}/models/${MODEL##*:}")
+    fi
 fi
 
 if [[ "$HTTP_CODE" -ne 200 ]]; then
     echo "Error: API call failed with HTTP status code $HTTP_CODE."
     
-    # Check for EULA-related error
-    if [[ "$HTTP_CODE" -eq 403 ]] || [[ "$HTTP_CODE" -eq 400 ]]; then
+    # Check for EULA-related error (Vertex AI only)
+    if [[ "$ENDPOINT_TYPE" == "vertex" ]] && ([[ "$HTTP_CODE" -eq 403 ]] || [[ "$HTTP_CODE" -eq 400 ]]); then
         echo ""
         echo "⚠️  This might be an EULA acceptance issue."
         echo "   Please ensure you've accepted the EULA for this model."
