@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Script to discover Vertex AI models available via the global endpoint.
 
@@ -80,6 +81,16 @@ CONTINENT_NAMES = {
     "asia": "Asia Pacific",
 }
 
+# Standardized Symbols
+SYM_ROCKET = "🚀"
+SYM_CHECK = "✅"
+SYM_WARN = "⚠️"
+SYM_LOCK = "🔒"
+SYM_DOC = "📜"
+SYM_GLOBE = "🌍"
+SYM_X = "❌"
+SYM_POINT = "👉"
+SYM_DASH = "—"
 
 def get_access_token() -> str:
     """Get access token from gcloud."""
@@ -403,10 +414,10 @@ def discover_models(project: str, use_static: bool = False, continent: str | Non
     if continent:
         continent_name = CONTINENT_NAMES.get(continent, continent)
         endpoint_name = f"{continent_name}"
-        emoji = "üìç"
+        emoji = SYM_GLOBE
     else:
         endpoint_name = "Global"
-        emoji = "üåç"
+        emoji = SYM_ROCKET
     
     print("=" * 120)
     print(f"{emoji} Discovering Vertex AI Models on {endpoint_name} Endpoint")
@@ -509,13 +520,13 @@ def discover_models(project: str, use_static: bool = False, continent: str | Non
             
             # Format status
             if status == "available":
-                status_str = "‚úÖ Available"
+                status_str = f"{SYM_CHECK} Available"
             elif status == "needs_eula":
-                status_str = "üìù Needs EULA"
+                status_str = f"{SYM_DOC} Needs EULA"
             elif status == "needs_permission":
-                status_str = "üîê Needs Perm"
+                status_str = f"{SYM_LOCK} Needs Perm"
             else:
-                status_str = f"‚ùì {status}"
+                status_str = f"{SYM_WARN} {status}"
             
             # Format regions - show all or truncate
             if len(model_regions) <= 3:
@@ -547,15 +558,15 @@ def discover_models(project: str, use_static: bool = False, continent: str | Non
             
             # Format status
             if status == "available":
-                status_str = "‚úÖ Available"
+                status_str = f"{SYM_CHECK} Available"
             elif status == "needs_eula":
-                status_str = "üìù Needs EULA"
+                status_str = f"{SYM_DOC} Needs EULA"
             elif status == "needs_permission":
-                status_str = "üîê Needs Perm"
+                status_str = f"{SYM_LOCK} Needs Perm"
             else:
-                status_str = f"‚ùì {status}"
+                status_str = f"{SYM_WARN} {status}"
             
-            eula_str = "üìù" if requires_eula else "‚Äî"
+            eula_str = SYM_DOC if requires_eula else SYM_DASH
             
             print(f"{publisher:<12} {model_id:<55} {status_str:<18} {eula_str:<6}")
         
@@ -589,9 +600,9 @@ def discover_models(project: str, use_static: bool = False, continent: str | Non
     print(f"Total models: {len(all_models)}")
     print()
     print("Legend:")
-    print("  ‚úÖ Available      = Ready to use")
-    print("  üìù Needs EULA     = Must accept End User License Agreement")
-    print("  üîê Needs Perm     = Missing permissions or API not enabled")
+    print(f"  {SYM_CHECK} Available      = Ready to use")
+    print(f"  {SYM_DOC} Needs EULA     = Must accept End User License Agreement")
+    print(f"  {SYM_LOCK} Needs Perm     = Missing permissions or API not enabled")
     print()
     print("To accept EULA for a model, run:")
     print(f"  gcloud alpha ai models describe publishers/PUBLISHER/models/MODEL_ID \\")
@@ -651,7 +662,7 @@ def test_model(publisher: str, model_id: str, project: str | None = None):
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         
         if response.status_code == 200:
-            print(f"‚úÖ Model works on global endpoint!")
+            print(f"{SYM_CHECK} Model works on global endpoint!")
             print()
             data = response.json()
             if "candidates" in data:
@@ -664,7 +675,7 @@ def test_model(publisher: str, model_id: str, project: str | None = None):
                     text = str(data["content"])
                 print(f"Response: {text}")
         else:
-            print(f"‚ùå Model returned status {response.status_code}")
+            print(f"{SYM_X} Model returned status {response.status_code}")
             try:
                 error_data = response.json()
                 error_msg = error_data.get("error", {}).get("message", "Unknown error")
@@ -672,16 +683,19 @@ def test_model(publisher: str, model_id: str, project: str | None = None):
                 
                 if "agreement" in error_msg.lower() or "eula" in error_msg.lower():
                     print()
-                    print("üí° Accept EULA with:")
+                    print(f"{SYM_POINT} Accept EULA with:")
                     print(f"   gcloud alpha ai models describe publishers/{publisher}/models/{model_id} \\")
                     print(f"     --project {project} --region us-central1")
             except Exception:
                 print(f"Response: {response.text[:400]}")
     except Exception as e:
-        print(f"‚ùå Error: {e}")
+        print(f"{SYM_X} Error: {e}")
 
 
 def main():
+    # Force UTF-8 encoding for output
+    sys.stdout.reconfigure(encoding='utf-8')
+
     parser = argparse.ArgumentParser(
         description="Discover Vertex AI models on the global endpoint",
         formatter_class=argparse.RawDescriptionHelpFormatter,
